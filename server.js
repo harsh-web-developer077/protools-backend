@@ -65,12 +65,14 @@ const usageRoutes = require("./routes/usage");
 const adminRoutes = require("./routes/admin");
 const offerRoutes = require("./routes/offers");
 const contactRoutes = require("./routes/contact");
+const membershipRoutes = require("./routes/membership");
 
 app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/usage", usageRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/offers", offerRoutes);
 app.use("/api/contact", contactRoutes);
+app.use("/api/membership", membershipRoutes);
 
 // Health check
 app.get("/", (req, res) => {
