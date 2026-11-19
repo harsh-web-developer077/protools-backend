@@ -1,68 +1,24 @@
-const express = require("express");
-const MembershipPayment = require("../models/MembershipPayment");
-const User = require("../models/User");
-const { requireAuth, requireAdmin } = require("../middleware/auth");
-
-const router = express.Router();
-const plans = { monthly: { amount: 199, days: 30 }, yearly: { amount: 999, days: 365 } };
-
-router.post("/payments", requireAuth, async (req, res) => {
-  try {
-    const { plan, utr } = req.body || {};
-    if (!plans[plan] || typeof utr !== "string" || !/^[A-Za-z0-9-]{8,30}$/.test(utr.trim())) {
-      return res.status(400).json({ success: false, message: "Select a valid plan and enter a valid UTR/reference number (8-30 characters)." });
-    }
-    const cleanUtr = utr.trim().toUpperCase();
-    const exists = await MembershipPayment.findOne({ utr: cleanUtr });
-    if (exists) return res.status(409).json({ success: false, message: "This UTR has already been submitted." });
-    const payment = await MembershipPayment.create({ user: req.user._id, plan, amount: plans[plan].amount, utr: cleanUtr });
-    return res.status(201).json({ success: true, message: "Payment request submitted for administrator verification.", paymentId: payment._id, status: payment.status });
-  } catch (error) {
-    if (error.code === 11000) return res.status(409).json({ success: false, message: "This UTR has already been submitted." });
-    console.error("Membership payment submit:", error.message);
-    return res.status(500).json({ success: false, message: "Could not submit payment request." });
-  }
-});
-
-router.get("/payments/mine", requireAuth, async (req, res) => {
-  const payments = await MembershipPayment.find({ user: req.user._id }).sort({ createdAt: -1 }).limit(20).lean();
-  res.json({ success: true, payments });
-});
-
-router.get("/admin/payments", requireAuth, requireAdmin, async (req, res) => {
-  const payments = await MembershipPayment.find().populate("user", "name email").sort({ createdAt: -1 }).limit(100).lean();
-  res.json({ success: true, payments: payments.map(p => ({ ...p, userEmail: p.user?.email || "", userName: p.user?.name || "" })) });
-});
-
-router.post("/admin/payments/:id/:action", requireAuth, requireAdmin, async (req, res) => {
-  try {
-    const { id, action } = req.params;
-    if (!["approve", "reject"].includes(action)) return res.status(400).json({ success: false, message: "Invalid review action." });
-    const payment = await MembershipPayment.findOneAndUpdate(
-      { _id: id, status: "pending" },
-      { $set: { status: action === "approve" ? "approved" : "rejected", reviewedBy: req.user._id, reviewedAt: new Date() } },
-      { new: true }
-    );
-    if (!payment) return res.status(404).json({ success: false, message: "Pending payment request not found." });
-    if (action === "approve") {
-      const days = plans[payment.plan].days;
-      const user = await User.findById(payment.user);
-      if (!user) {
-        await MembershipPayment.updateOne({ _id: payment._id }, { $set: { status: "pending", reviewedBy: null, reviewedAt: null } });
-        return res.status(404).json({ success: false, message: "Payment user account not found." });
-      }
-      const now = new Date();
-      const activeExpiry = user.membershipExpiresAt && user.membershipExpiresAt > now ? user.membershipExpiresAt : now;
-      user.membershipPlan = payment.plan;
-      user.membershipStartedAt = user.membershipStartedAt && user.membershipExpiresAt > now ? user.membershipStartedAt : now;
-      user.membershipExpiresAt = new Date(activeExpiry.getTime() + days * 86400000);
-      await user.save();
-    }
-    return res.json({ success: true, message: action === "approve" ? "Payment approved and Pro membership activated." : "Payment request rejected." });
-  } catch (error) {
-    console.error("Membership review:", error.message);
-    return res.status(500).json({ success: false, message: "Could not review payment request." });
-  }
-});
-
-module.exports = router;
+const express=require("express");
+const MembershipPayment=require("../models/MembershipPayment");
+const Coupon=require("../models/Coupon");
+const User=require("../models/User");
+const {requireAuth,requireAdmin}=require("../middleware/auth");
+const router=express.Router();
+const plans={monthly:{amount:199,days:30},yearly:{amount:999,days:365}};
+async function price(plan,code){
+ const base=plans[plan].amount;if(!code)return{base,discount:0,amount:base,coupon:null};
+ const c=await Coupon.findOne({code:String(code).trim().toUpperCase(),isActive:true});
+ if(!c)throw Error("Invalid or inactive coupon.");if(c.expiresAt&&c.expiresAt<=new Date())throw Error("Coupon expired.");
+ if(c.maxUses>0&&c.usedCount>=c.maxUses)throw Error("Coupon usage limit reached.");if(!c.plans.includes(plan))throw Error("Coupon not valid for this plan.");
+ const discount=Math.min(base,c.type==="percent"?Math.round(base*c.value/100):c.value);return{base,discount,amount:base-discount,coupon:c};
+}
+router.post("/coupons/validate",requireAuth,async(req,res)=>{try{const{plan,code}=req.body||{};if(!plans[plan]||!code)return res.status(400).json({success:false,message:"Select plan and enter coupon."});const p=await price(plan,code);res.json({success:true,base:p.base,discount:p.discount,amount:p.amount,code:p.coupon.code});}catch(e){res.status(400).json({success:false,message:e.message});}});
+router.get("/admin/coupons",requireAuth,requireAdmin,async(req,res)=>res.json({success:true,coupons:await Coupon.find().sort({createdAt:-1}).lean()}));
+router.post("/admin/coupons",requireAuth,requireAdmin,async(req,res)=>{try{const b=req.body||{},code=String(b.code||"").trim().toUpperCase(),type=b.type,value=Number(b.value),eligible=Array.isArray(b.plans)?b.plans.filter(x=>plans[x]):["monthly","yearly"];if(!/^[A-Z0-9_-]{3,24}$/.test(code)||!["percent","fixed"].includes(type)||!Number.isFinite(value)||value<1||value>(type==="percent"?100:999)||!eligible.length)return res.status(400).json({success:false,message:"Invalid coupon details."});const c=await Coupon.create({code,type,value,plans:eligible,maxUses:Math.max(0,Number(b.maxUses)||0),expiresAt:b.expiresAt?new Date(b.expiresAt):null,isActive:true});res.status(201).json({success:true,coupon:c});}catch(e){res.status(e.code===11000?409:400).json({success:false,message:e.code===11000?"Coupon code already exists.":e.message});}});
+router.patch("/admin/coupons/:id",requireAuth,requireAdmin,async(req,res)=>{const c=await Coupon.findByIdAndUpdate(req.params.id,{$set:{isActive:!!req.body.isActive}},{new:true});if(!c)return res.status(404).json({success:false,message:"Coupon not found."});res.json({success:true,coupon:c});});
+router.delete("/admin/coupons/:id",requireAuth,requireAdmin,async(req,res)=>{const c=await Coupon.findByIdAndDelete(req.params.id);if(!c)return res.status(404).json({success:false,message:"Coupon not found."});res.json({success:true});});
+router.post("/payments",requireAuth,async(req,res)=>{try{const{plan,utr,couponCode}=req.body||{};if(!plans[plan]||typeof utr!=="string"||!/^[A-Za-z0-9-]{8,30}$/.test(utr.trim()))return res.status(400).json({success:false,message:"Select a valid plan and enter a valid UTR."});const p=await price(plan,couponCode);if(p.amount<1)return res.status(400).json({success:false,message:"Invalid payable amount."});const payment=await MembershipPayment.create({user:req.user._id,plan,amount:p.amount,utr:utr.trim().toUpperCase(),couponCode:p.coupon?.code||""});if(p.coupon)await Coupon.updateOne({_id:p.coupon._id},{$inc:{usedCount:1}});res.status(201).json({success:true,message:"Request submitted for admin verification.",paymentId:payment._id,amount:p.amount,discount:p.discount,status:payment.status});}catch(e){res.status(e.code===11000?409:400).json({success:false,message:e.code===11000?"UTR already submitted.":e.message});}});
+router.get("/payments/mine",requireAuth,async(req,res)=>res.json({success:true,payments:await MembershipPayment.find({user:req.user._id}).sort({createdAt:-1}).limit(20).lean()}));
+router.get("/admin/payments",requireAuth,requireAdmin,async(req,res)=>{const ps=await MembershipPayment.find().populate("user","name email").sort({createdAt:-1}).limit(100).lean();res.json({success:true,payments:ps.map(p=>({...p,userEmail:p.user?.email||"",userName:p.user?.name||""}))});});
+router.post("/admin/payments/:id/:action",requireAuth,requireAdmin,async(req,res)=>{try{const{id,action}=req.params;if(!["approve","reject"].includes(action))return res.status(400).json({success:false,message:"Invalid action."});const p=await MembershipPayment.findOneAndUpdate({_id:id,status:"pending"},{$set:{status:action==="approve"?"approved":"rejected",reviewedBy:req.user._id,reviewedAt:new Date()}},{new:true});if(!p)return res.status(404).json({success:false,message:"Pending request not found."});if(action==="approve"){const u=await User.findById(p.user);if(!u){await MembershipPayment.updateOne({_id:p._id},{$set:{status:"pending",reviewedBy:null,reviewedAt:null}});return res.status(404).json({success:false,message:"User not found."});}const now=new Date(),expiry=u.membershipExpiresAt&&u.membershipExpiresAt>now?u.membershipExpiresAt:now;u.membershipPlan=p.plan;u.membershipStartedAt=u.membershipStartedAt&&u.membershipExpiresAt>now?u.membershipStartedAt:now;u.membershipExpiresAt=new Date(expiry.getTime()+plans[p.plan].days*86400000);await u.save();}res.json({success:true,message:"Payment request "+action+"d."});}catch(e){res.status(500).json({success:false,message:"Could not review request."});}});
+module.exports=router;
