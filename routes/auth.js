@@ -1,6 +1,5 @@
 
 const express = require("express");
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 const User = require("../models/User");
@@ -15,6 +14,20 @@ function createToken(user) {
     process.env.JWT_SECRET,
     { expiresIn: "7d" }
   );
+}
+
+function publicUser(user) {
+  user.refreshMembership();
+
+  return {
+    id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    membershipPlan: user.membershipPlan,
+    membershipStartedAt: user.membershipStartedAt,
+    membershipExpiresAt: user.membershipExpiresAt
+  };
 }
 
 // SIGNUP
@@ -68,12 +81,12 @@ router.post("/signup", async (req, res) => {
       });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 12);
-
+    // User model hashes the password automatically.
+    // Do not hash it manually here.
     const user = await User.create({
       name: cleanName,
       email: cleanEmail,
-      password: hashedPassword
+      password
     });
 
     const token = createToken(user);
@@ -82,12 +95,7 @@ router.post("/signup", async (req, res) => {
       success: true,
       message: "Account created successfully",
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role
-      }
+      user: publicUser(user)
     });
 
   } catch (error) {
@@ -135,10 +143,7 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const passwordMatch = await bcrypt.compare(
-      password,
-      user.password
-    );
+    const passwordMatch = await user.comparePassword(password);
 
     if (!passwordMatch) {
       return res.status(401).json({
@@ -148,6 +153,8 @@ router.post("/login", async (req, res) => {
     }
 
     user.lastLogin = new Date();
+    user.refreshMembership();
+
     await user.save();
 
     await LoginActivity.create({
@@ -160,12 +167,7 @@ router.post("/login", async (req, res) => {
       success: true,
       message: "Login successful",
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role
-      }
+      user: publicUser(user)
     });
 
   } catch (error) {
@@ -178,17 +180,22 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// CURRENT LOGGED-IN USER
+// CURRENT USER
 router.get("/me", requireAuth, async (req, res) => {
-  res.json({
-    success: true,
-    user: {
-      id: req.user._id,
-      name: req.user.name,
-      email: req.user.email,
-      role: req.user.role
-    }
-  });
+  try {
+    req.user.refreshMembership();
+    await req.user.save();
+
+    res.json({
+      success: true,
+      user: publicUser(req.user)
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Unable to load account"
+    });
+  }
 });
 
 module.exports = router;
