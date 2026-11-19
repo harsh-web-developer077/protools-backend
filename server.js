@@ -8,15 +8,16 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 
 const app = express();
-
 const PORT = process.env.PORT || 5000;
 
-// Render proxy support
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+  throw new Error("JWT_SECRET must contain at least 32 characters");
+}
+
 if (process.env.NODE_ENV === "production") {
   app.set("trust proxy", 1);
 }
 
-// Security middleware
 app.use(helmet());
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
@@ -26,9 +27,7 @@ const allowedOrigins = (process.env.FRONTEND_URL || "")
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow server-to-server and local development requests
-    if (!origin || allowedOrigins.length === 0 ||
-        allowedOrigins.includes(origin)) {
+    if (!origin || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
@@ -40,19 +39,38 @@ app.use(cors({
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
-// General API rate limit
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 200,
   standardHeaders: "draft-7",
+  legacyHeaders: false
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-7",
   legacyHeaders: false,
   message: {
     success: false,
-    message: "Too many requests. Please try again later."
+    message: "Too many authentication attempts. Try again later."
   }
 });
 
 app.use("/api", apiLimiter);
+
+// Authentication routes
+const authRoutes = require("./routes/auth");
+const usageRoutes = require("./routes/usage");
+const adminRoutes = require("./routes/admin");
+const offerRoutes = require("./routes/offers");
+const contactRoutes = require("./routes/contact");
+
+app.use("/api/auth", authLimiter, authRoutes);
+app.use("/api/usage", usageRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/offers", offerRoutes);
+app.use("/api/contact", contactRoutes);
 
 // Health check
 app.get("/", (req, res) => {
@@ -72,11 +90,20 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Start server only after MongoDB connects
+// Error handler
+app.use((err, req, res, next) => {
+  console.error("API error:", err.message);
+
+  res.status(500).json({
+    success: false,
+    message: "Something went wrong"
+  });
+});
+
 async function startServer() {
   try {
     if (!process.env.MONGODB_URI) {
-      throw new Error("MONGODB_URI is missing in .env file");
+      throw new Error("MONGODB_URI is missing");
     }
 
     await mongoose.connect(process.env.MONGODB_URI);
